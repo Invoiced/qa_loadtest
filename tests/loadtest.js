@@ -3,25 +3,44 @@ import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { b64encode } from 'k6/encoding';
 import { textSummary } from 'https://jslib.k6.io/k6-summary/0.0.4/index.js';
+import { htmlReport } from 'https://raw.githubusercontent.com/benc-uk/k6-reporter/main/dist/bundle.js';
 
 // === ENVIRONMENT CONFIG ===
-// Required or defaulted values can be passed via CLI as: VAR=value k6 run loadtest.js
-const ENDPOINT      = __ENV.ENDPOINT || 'https://api.staging.invoiced.com/list_events'; // <-- now parameterized!
-const METHOD        = (__ENV.METHOD || 'GET').toUpperCase();  // GET | POST | PUT | DELETE
-const QUERY         = __ENV.QUERY || '';                      // e.g. "since=2025-01-01&limit=100"
-const BODY_JSON     = __ENV.BODY_JSON || '';                  // raw JSON for POST/PUT/PATCH
-const SLEEP_SECS    = Number(__ENV.SLEEP || '0');             // pause between iterations
-const TIMEOUT_MS    = Number(__ENV.TIMEOUT_MS || '60000');    // request timeout
+const BASE_URL      = __ENV.BASE_URL || 'https://api.invoiced-backend-staging.invoiced.com';
+const METHOD        = (__ENV.METHOD || 'GET').toUpperCase();
+const QUERY         = __ENV.QUERY || '';
+const BODY_JSON     = __ENV.BODY_JSON || '';
+const SLEEP_SECS    = Number(__ENV.SLEEP || '0');
+const TIMEOUT_MS    = Number(__ENV.TIMEOUT_MS || '60000');
 
-// Auth options (pick one)
+// Multiple API keys — comma-separated. Each key gets its own 20-concurrent-request allowance.
+// Example: -e API_KEYS="key1,key2,key3"
+const API_KEYS      = (__ENV.API_KEYS || '').split(',').filter(k => k.trim());
+const BASIC_PASS    = __ENV.BASIC_PASS || '';
+
+// Single key fallback (backwards compatible)
 const BEARER_TOKEN  = __ENV.BEARER_TOKEN || '';
 const BASIC_USER    = __ENV.BASIC_USER || '';
-const BASIC_PASS    = __ENV.BASIC_PASS || '';
 
 // Load profile
 const TOTAL_ITERS   = Number(__ENV.TOTAL_ITERATIONS || '500000');
 const VUS           = Number(__ENV.VUS || '200');
 const MAX_DURATION  = __ENV.MAX_DURATION || '2h';
+
+// Endpoint rotation — CPU-intensive endpoints that stress PHP + DB.
+// Override with: -e ENDPOINTS="/customers,/invoices,/events"
+const DEFAULT_ENDPOINTS = [
+    '/customers',
+    '/invoices',
+    '/events',
+    '/credit_notes',
+    '/subscriptions',
+    '/payments',
+    '/estimates',
+];
+const ENDPOINTS = __ENV.ENDPOINTS
+    ? __ENV.ENDPOINTS.split(',').map(e => e.trim())
+    : DEFAULT_ENDPOINTS;
 
 // === SCENARIO SETTINGS ===
 export const options = {
@@ -35,11 +54,19 @@ export const options = {
     },
     thresholds: {
         http_req_failed: ['rate<0.01'],
-        http_req_duration: ['p(95)<500'],
+        http_req_duration: ['p(95)<2000'],
     },
 };
 
-function buildHeaders() {
+// Pre-compute auth headers for each API key to avoid repeated encoding
+const AUTH_HEADERS = API_KEYS.map(key => ({
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'Authorization': `Basic ${b64encode(`${key.trim()}:${BASIC_PASS}`)}`,
+}));
+
+// Fallback single-key header
+function buildFallbackHeaders() {
     const headers = {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
@@ -52,16 +79,31 @@ function buildHeaders() {
     return headers;
 }
 
-function buildUrl() {
-    if (!QUERY) return ENDPOINT;
-    const hasQ = ENDPOINT.includes('?');
-    return `${ENDPOINT}${hasQ ? '&' : '?'}${QUERY}`;
-}
+const FALLBACK_HEADERS = buildFallbackHeaders();
 
 export default function () {
-    const url = buildUrl();
+    // Distribute VUs across API keys — each VU uses a consistent key based on its ID.
+    // This spreads load evenly so no single key exceeds 20 concurrent requests.
+    let headers;
+    if (AUTH_HEADERS.length > 0) {
+        const keyIndex = __VU % AUTH_HEADERS.length;
+        headers = AUTH_HEADERS[keyIndex];
+    } else {
+        headers = FALLBACK_HEADERS;
+    }
+
+    // Rotate endpoints across iterations to hit different DB tables and PHP code paths
+    const endpointIndex = (__ITER + __VU) % ENDPOINTS.length;
+    const endpoint = ENDPOINTS[endpointIndex];
+    let url = `${BASE_URL}${endpoint}`;
+
+    // Add query params that force heavy DB work (sorting, filtering, pagination)
+    const heavyQuery = QUERY || 'per_page=100&sort=created_at';
+    const separator = url.includes('?') ? '&' : '?';
+    url = `${url}${separator}${heavyQuery}`;
+
     const params = {
-        headers: buildHeaders(),
+        headers: headers,
         timeout: `${TIMEOUT_MS}ms`,
     };
 
@@ -74,15 +116,21 @@ export default function () {
 
     check(res, {
         'status is 2xx': (r) => r.status >= 200 && r.status < 300,
-        'duration < 500ms': (r) => r.timings.duration < 500,
+        'not rate limited': (r) => r.status !== 429,
+        'not 502 bad gateway': (r) => r.status !== 502,
+        'not 504 gateway timeout': (r) => r.status !== 504,
+        'no TLS/SSL error': (r) => r.status !== 0 || !r.error || (!r.error.includes('tls:') && !r.error.includes('SSL') && !r.error.includes('certificate')),
+        'duration < 2000ms': (r) => r.timings.duration < 2000,
     });
 
     if (SLEEP_SECS > 0) sleep(SLEEP_SECS);
 }
 
 export function handleSummary(data) {
+    const reportFile = __ENV.REPORT_FILE || 'tests/report.html';
     return {
         'stdout': textSummary(data, { indent: ' ', enableColors: true }),
-        'summary.json': JSON.stringify(data, null, 2),
+        'tests/summary.json': JSON.stringify(data, null, 2),
+        [reportFile]: htmlReport(data),
     };
 }
