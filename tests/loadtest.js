@@ -8,7 +8,7 @@ import { htmlReport } from 'https://raw.githubusercontent.com/benc-uk/k6-reporte
 // === ENVIRONMENT CONFIG ===
 const BASE_URL      = __ENV.BASE_URL || 'https://api.invoiced-backend-staging.invoiced.com';
 const METHOD        = (__ENV.METHOD || 'GET').toUpperCase();
-const QUERY         = __ENV.QUERY || '';
+const QUERY         = __ENV.QUERY;  // undefined = not set; '' = explicitly empty (no query)
 const BODY_JSON     = __ENV.BODY_JSON || '';
 const SLEEP_SECS    = Number(__ENV.SLEEP || '0');
 const TIMEOUT_MS    = Number(__ENV.TIMEOUT_MS || '60000');
@@ -97,10 +97,12 @@ export default function () {
     const endpoint = ENDPOINTS[endpointIndex];
     let url = `${BASE_URL}${endpoint}`;
 
-    // Add query params that force heavy DB work (sorting, filtering, pagination)
-    const heavyQuery = QUERY || 'per_page=100&sort=created_at';
-    const separator = url.includes('?') ? '&' : '?';
-    url = `${url}${separator}${heavyQuery}`;
+    // Add query params if provided; default to heavy DB query when QUERY is not set at all
+    const heavyQuery = QUERY !== undefined ? QUERY : 'per_page=100&sort=created_at';
+    if (heavyQuery) {
+        const separator = url.includes('?') ? '&' : '?';
+        url = `${url}${separator}${heavyQuery}`;
+    }
 
     const params = {
         headers: headers,
