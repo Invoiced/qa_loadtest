@@ -1,0 +1,100 @@
+{
+  "AUTOSCALING_CONFIG": [
+    {
+      "type": "step_scaling",
+      "statistic": "Average",
+      "comparison_operator": "LessThanOrEqualToThreshold",
+      "threshold": 100,
+      "evaluation_periods": 1,
+      "adjustment_type": "ChangeInCapacity",
+      "cooldown": 60,
+      "metric_queries": [
+        {
+          "id": "m2",
+          "return_data": false,
+          "metric": {
+            "metric_name": "QueueDepth",
+            "namespace": "Resque",
+            "stat": "Maximum",
+            "period": 60,
+            "dimensions": { "Environment": "staging", "Queue": "normal" }
+          }
+        },
+        {
+          "id": "m3",
+          "return_data": false,
+          "metric": {
+            "metric_name": "CPUUtilization",
+            "namespace": "AWS/ECS",
+            "stat": "SampleCount",
+            "period": 60,
+            "dimensions": {
+              "ServiceName": "InvoicedResqueWorker",
+              "ClusterName": "$CI_PROJECT_NAME-$ENVIRONMENT"
+            }
+          }
+        },
+        {
+          "id": "e1",
+          "return_data": true,
+          "label": "Backlog Per Worker",
+          "expression": "m2/m3"
+        }
+      ],
+      "step_adjustments": [
+        { "metric_interval_upper_bound": 0, "scaling_adjustment": -1 }
+      ]
+    },
+    {
+      "type": "step_scaling",
+      "statistic": "Average",
+      "comparison_operator": "GreaterThanThreshold",
+      "threshold": 100,
+      "evaluation_periods": 1,
+      "adjustment_type": "ExactCapacity",
+      "cooldown": 60,
+      "metric_queries": [
+        {
+          "id": "m2",
+          "return_data": false,
+          "metric": {
+            "metric_name": "QueueDepth",
+            "namespace": "Resque",
+            "stat": "Maximum",
+            "period": 60,
+            "dimensions": { "Environment": "staging", "Queue": "normal" }
+          }
+        },
+        {
+          "id": "m3",
+          "return_data": false,
+          "metric": {
+            "metric_name": "CPUUtilization",
+            "namespace": "AWS/ECS",
+            "stat": "SampleCount",
+            "period": 60,
+            "dimensions": {
+              "ServiceName": "InvoicedResqueWorker",
+              "ClusterName": "$CI_PROJECT_NAME-$ENVIRONMENT"
+            }
+          }
+        },
+        {
+          "id": "e1",
+          "return_data": true,
+          "label": "Backlog Per Worker",
+          "expression": "m2/m3"
+        }
+      ],
+      "step_adjustments": [
+        { "metric_interval_lower_bound": 0, "metric_interval_upper_bound": 100, "scaling_adjustment": 2 },
+        { "metric_interval_lower_bound": 100, "metric_interval_upper_bound": 400, "scaling_adjustment": 5 },
+        { "metric_interval_lower_bound": 400, "metric_interval_upper_bound": 900, "scaling_adjustment": 10 },
+        { "metric_interval_lower_bound": 900, "metric_interval_upper_bound": 1900, "scaling_adjustment": 20 },
+        { "metric_interval_lower_bound": 1900, "metric_interval_upper_bound": 2900, "scaling_adjustment": 30 },
+        { "metric_interval_lower_bound": 2900, "metric_interval_upper_bound": 3900, "scaling_adjustment": 40 },
+        { "metric_interval_lower_bound": 3900, "scaling_adjustment": 50 }
+      ]
+    }
+  ]
+}

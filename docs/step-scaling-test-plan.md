@@ -1,6 +1,6 @@
 # Step Scaling Test Plan: InvoicedResqueWorker
 
-Status: **Proposed, not implemented.** Saved for reference if the decision is made to add a step-scaling profile to `tests/loadtest.js`.
+Status: **Implemented** as `PROFILE=steps` in `tests/loadtest.js`. Policy saved in `config/autoscaling-policy.json`; usage is in the README. Open questions 1, 3, 4 and 5 below are still unanswered.
 
 Assumption: "step scaling" means a step scaling policy (e.g. AWS Application Auto Scaling) on the Resque worker fleet, triggered by a CloudWatch alarm on queue depth or backlog. Confirm this with the infrastructure owners before building.
 

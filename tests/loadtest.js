@@ -42,16 +42,53 @@ const ENDPOINTS = __ENV.ENDPOINTS
     ? __ENV.ENDPOINTS.split(',').map(e => e.trim())
     : DEFAULT_ENDPOINTS;
 
-// === SCENARIO SETTINGS ===
-export const options = {
-    scenarios: {
+// Step-scaling profile: PROFILE=steps drives a staircase arrival rate (requests/sec)
+// so the Resque queue backlog climbs through the autoscaling policy's bands.
+// STAGES format is "rate:duration,..." e.g. "5:2m,20:5m,50:5m,0:10m".
+// Policy reference: config/autoscaling-policy.json, docs/step-scaling-test-plan.md
+const PROFILE       = (__ENV.PROFILE || 'iterations').toLowerCase();
+const START_RATE    = Number(__ENV.START_RATE || '0');
+const DEFAULT_STAGES = '5:2m,20:5m,50:5m,0:10m';
+
+function parseStages(spec) {
+    return spec.split(',').map(s => s.trim()).filter(Boolean).map(s => {
+        const [rate, duration] = s.split(':');
+        if (!/^\d+$/.test(rate || '') || !/^(\d+[hms])+$/.test(duration || '')) {
+            throw new Error(`Invalid STAGES entry "${s}" — expected rate:duration, e.g. 50:5m`);
+        }
+        return { target: Number(rate), duration };
+    });
+}
+
+function buildScenarios() {
+    if (PROFILE === 'steps') {
+        return {
+            step_scaling: {
+                executor: 'ramping-arrival-rate',
+                startRate: START_RATE,
+                timeUnit: '1s',
+                preAllocatedVUs: Math.min(VUS, 50),
+                maxVUs: VUS,
+                stages: parseStages(__ENV.STAGES || DEFAULT_STAGES),
+            },
+        };
+    }
+    if (PROFILE !== 'iterations') {
+        throw new Error(`Unknown PROFILE "${PROFILE}" — use "iterations" (default) or "steps"`);
+    }
+    return {
         fixed_total: {
             executor: 'shared-iterations',
             vus: VUS,
             iterations: TOTAL_ITERS,
             maxDuration: MAX_DURATION,
         },
-    },
+    };
+}
+
+// === SCENARIO SETTINGS ===
+export const options = {
+    scenarios: buildScenarios(),
     thresholds: {
         http_req_failed: ['rate<0.01'],
         http_req_duration: ['p(95)<2000'],

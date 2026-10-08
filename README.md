@@ -92,6 +92,14 @@ k6 run -e API_KEYS="key1,key2,key3" \
        tests/loadtest.js
 ```
 
+**Storing keys in a `.env` file:** copy `.env.example` to `.env` (gitignored) and put all keys on the single `API_KEYS=` line. k6 does not read `.env` itself, so load it into your shell and pass the value through:
+
+```
+cp .env.example .env      # then edit .env
+set -a; source .env; set +a
+k6 run -e API_KEYS="$API_KEYS" -e BASE_URL="$BASE_URL" tests/loadtest.js
+```
+
 ⸻
 
 🔀 Multiple Endpoints
@@ -156,6 +164,63 @@ k6 cloud tests/loadtest.js
 ```
 ⸻
 
+📈 Step Scaling Test (InvoicedResqueWorker Autoscaling)
+
+Validates the staging autoscaling policy for the `InvoicedResqueWorker` ECS service. The policy is saved in `config/autoscaling-policy.json` (reference only — the script does not read it). Background and open questions are in `docs/step-scaling-test-plan.md`.
+
+**How the policy works**
+
+The metric is **Backlog Per Worker** = `QueueDepth` (Resque, queue `normal`, Maximum) ÷ running worker count (`SampleCount` of ECS `CPUUtilization`), evaluated over 60s periods with a 60s cooldown.
+
+| Backlog per worker | Action | Type |
+|---|---|---|
+| ≤ 100 | remove 1 worker | ChangeInCapacity (scale in) |
+| 100 – 200 | set to **2** workers | ExactCapacity |
+| 200 – 500 | set to **5** workers | ExactCapacity |
+| 500 – 1,000 | set to **10** workers | ExactCapacity |
+| 1,000 – 2,000 | set to **20** workers | ExactCapacity |
+| 2,000 – 3,000 | set to **30** workers | ExactCapacity |
+| 3,000 – 4,000 | set to **40** workers | ExactCapacity |
+| > 4,000 | set to **50** workers | ExactCapacity |
+
+The `metric_interval_*` bounds in the policy are offsets from the threshold (100), so the bands above are the absolute backlog-per-worker values. Scale-out values are the *total* worker count, not an increment.
+
+**Running it**
+
+`PROFILE=steps` switches from the default fixed-iteration run to a `ramping-arrival-rate` staircase. `STAGES` is a list of `rate:duration` pairs, where rate is requests/sec.
+
+```
+k6 run -e PROFILE=steps \
+       -e STAGES="5:2m,20:5m,50:5m,0:10m" \
+       -e API_KEYS="$API_KEYS" \
+       -e METHOD=POST \
+       -e ENDPOINTS="<job-enqueuing endpoints>" \
+       -e BODY_JSON='<payload>' \
+       -e VUS=100 \
+       tests/loadtest.js
+```
+
+- Keep API keys in the environment or your approved secrets store; never commit them.
+- Hold each stage longer than the 60s metric period + cooldown + task start-up time, otherwise you will not see the step land.
+- End with a `0:<duration>` stage so the scale-in rule (-1 per cooldown) is exercised.
+- `VUS` is the maximum VU pool; if k6 reports `dropped_iterations`, the rate exceeded what the VUs/rate limit could deliver. More API keys raise the ceiling (20 concurrent requests per key).
+- The default endpoints are read-only `GET`s and do **not** enqueue Resque jobs. To move the backlog you must target endpoints that enqueue jobs onto the `normal` queue (confirm with the Invoiced devs).
+
+**What to observe (outside k6)**
+
+k6 only generates load. Watch these in CloudWatch/ECS during the run:
+- `Resque/QueueDepth` (Queue=normal) and the Backlog Per Worker expression
+- ECS desired vs running task count and the scaling activity history
+- Time for the backlog to drain after load stops
+
+**Things to check**
+
+- Each band produces the expected worker count after one evaluation period.
+- Capacity never exceeds 50 and drops by 1 per cooldown once backlog per worker is ≤ 100.
+- **Possible flapping:** scale-out uses ExactCapacity, so when backlog per worker falls into the 100–200 band the policy sets the fleet to 2 workers, which can sharply raise backlog per worker and trigger a larger scale-out again. Watch for oscillation near the band edges.
+
+⸻
+
 💡 Environment Variables Reference
 
 | Variable         | Description                                          | Default Value                                                                       |
@@ -176,6 +241,9 @@ k6 cloud tests/loadtest.js
 | TIMEOUT_MS       | Request timeout in ms                                | 60000                                                                               |
 | REPORT_FILE      | Output path for the HTML report                      | tests/report.html                                                                   |
 | MAX_DURATION     | Safety ceiling for test duration                     | 2h                                                                                  |
+| PROFILE          | `iterations` (fixed total) or `steps` (staircase)    | iterations                                                                          |
+| STAGES           | `rate:duration` list for `PROFILE=steps`             | 5:2m,20:5m,50:5m,0:10m                                                              |
+| START_RATE       | Starting requests/sec for `PROFILE=steps`            | 0                                                                                   |
 
 
 ⸻
